@@ -1,0 +1,8 @@
+project: rnshah9/luau
+target: luau
+image: ghcr.io/rnshah9/playground:luau
+tests: null
+
+cmds:
+  - cmd: /repo/luau-analyze @@
+ #    filepath: /test.c
