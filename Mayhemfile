@@ -1,6 +1,5 @@
-project: rnshah9/luau
-target: luau
-tests: null
+project: luau
+target: luau-analyze
 
 cmds:
   - cmd: /repo/luau-analyze @@
