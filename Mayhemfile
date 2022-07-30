@@ -2,4 +2,4 @@ project: luau
 target: luau-analyze
 
 cmds:
-  - cmd: /repo/luau-analyze @@
+  - cmd: /luau-analyze @@
