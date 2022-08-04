@@ -13,8 +13,10 @@
 
 #include <algorithm>
 
-LUAU_FASTFLAG(LuauLowerBoundsCalculation)
-LUAU_FASTFLAG(LuauFixLocationSpanTableIndexExpr)
+LUAU_FASTFLAG(LuauLowerBoundsCalculation);
+LUAU_FASTFLAG(LuauFixLocationSpanTableIndexExpr);
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTFLAG(LuauSpecialTypesAsterisked);
 
 using namespace Luau;
 
@@ -43,10 +45,7 @@ TEST_CASE_FIXTURE(Fixture, "tc_error")
     CheckResult result = check("local a = 7   local b = 'hi'   a = b");
     LUAU_REQUIRE_ERROR_COUNT(1, result);
 
-    CHECK_EQ(result.errors[0], (TypeError{Location{Position{0, 35}, Position{0, 36}}, TypeMismatch{
-                                                                                          requireType("a"),
-                                                                                          requireType("b"),
-                                                                                      }}));
+    CHECK_EQ(result.errors[0], (TypeError{Location{Position{0, 35}, Position{0, 36}}, TypeMismatch{typeChecker.numberType, typeChecker.stringType}}));
 }
 
 TEST_CASE_FIXTURE(Fixture, "tc_error_2")
@@ -86,20 +85,20 @@ TEST_CASE_FIXTURE(Fixture, "infer_locals_via_assignment_from_its_call_site")
 TEST_CASE_FIXTURE(Fixture, "infer_in_nocheck_mode")
 {
     ScopedFastFlag sff[]{
-        {"LuauReturnTypeInferenceInNonstrict", true},
+        {"DebugLuauDeferredConstraintResolution", false},
         {"LuauLowerBoundsCalculation", true},
     };
 
     CheckResult result = check(R"(
         --!nocheck
         function f(x)
-            return 5
+            return x
         end
          -- we get type information even if there's type errors
         f(1, 2)
     )");
 
-    CHECK_EQ("(any) -> number", toString(requireType("f")));
+    CHECK_EQ("(any) -> (...any)", toString(requireType("f")));
 
     LUAU_REQUIRE_NO_ERRORS(result);
 }
@@ -236,10 +235,25 @@ TEST_CASE_FIXTURE(Fixture, "type_errors_infer_types")
     CHECK_EQ("boolean", toString(err->table));
     CHECK_EQ("x", err->key);
 
-    CHECK_EQ("*unknown*", toString(requireType("c")));
-    CHECK_EQ("*unknown*", toString(requireType("d")));
-    CHECK_EQ("*unknown*", toString(requireType("e")));
-    CHECK_EQ("*unknown*", toString(requireType("f")));
+    // TODO: Should we assert anything about these tests when DCR is being used?
+    if (!FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        if (FFlag::LuauSpecialTypesAsterisked)
+        {
+            CHECK_EQ("*error-type*", toString(requireType("c")));
+            CHECK_EQ("*error-type*", toString(requireType("d")));
+            CHECK_EQ("*error-type*", toString(requireType("e")));
+            CHECK_EQ("*error-type*", toString(requireType("f")));
+        }
+        else
+        {
+            CHECK_EQ("<error-type>", toString(requireType("c")));
+            CHECK_EQ("<error-type>", toString(requireType("d")));
+            CHECK_EQ("<error-type>", toString(requireType("e")));
+            CHECK_EQ("<error-type>", toString(requireType("f")));
+        }
+
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "should_be_able_to_infer_this_without_stack_overflowing")
@@ -366,11 +380,6 @@ TEST_CASE_FIXTURE(Fixture, "globals")
 
 TEST_CASE_FIXTURE(Fixture, "globals2")
 {
-    ScopedFastFlag sff[]{
-        {"LuauReturnTypeInferenceInNonstrict", true},
-        {"LuauLowerBoundsCalculation", true},
-    };
-
     CheckResult result = check(R"(
         --!nonstrict
         foo = function() return 1 end
@@ -381,9 +390,9 @@ TEST_CASE_FIXTURE(Fixture, "globals2")
 
     TypeMismatch* tm = get<TypeMismatch>(result.errors[0]);
     REQUIRE(tm);
-    CHECK_EQ("() -> number", toString(tm->wantedType));
+    CHECK_EQ("() -> (...any)", toString(tm->wantedType));
     CHECK_EQ("string", toString(tm->givenType));
-    CHECK_EQ("() -> number", toString(requireType("foo")));
+    CHECK_EQ("() -> (...any)", toString(requireType("foo")));
 }
 
 TEST_CASE_FIXTURE(Fixture, "globals_are_banned_in_strict_mode")
@@ -400,31 +409,14 @@ TEST_CASE_FIXTURE(Fixture, "globals_are_banned_in_strict_mode")
     CHECK_EQ("foo", us->name);
 }
 
-TEST_CASE_FIXTURE(Fixture, "globals_everywhere")
-{
-    CheckResult result = check(R"(
-        --!nonstrict
-        foo = 1
-
-        if true then
-            bar = 2
-        end
-    )");
-
-    LUAU_REQUIRE_NO_ERRORS(result);
-
-    CHECK_EQ("any", toString(requireType("foo")));
-    CHECK_EQ("any", toString(requireType("bar")));
-}
-
-TEST_CASE_FIXTURE(BuiltinsFixture, "correctly_scope_locals_do")
+TEST_CASE_FIXTURE(Fixture, "correctly_scope_locals_do")
 {
     CheckResult result = check(R"(
         do
             local a = 1
         end
 
-        print(a) -- oops!
+        local b = a -- oops!
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
@@ -446,21 +438,6 @@ TEST_CASE_FIXTURE(Fixture, "checking_should_not_ice")
 
     CHECK_EQ("any", toString(requireType("value")));
 }
-
-// TEST_CASE_FIXTURE(Fixture, "infer_method_signature_of_argument")
-// {
-//     CheckResult result = check(R"(
-//         function f(a)
-//             if a.cond then
-//                 return a.method()
-//             end
-//         end
-//     )");
-
-//     LUAU_REQUIRE_NO_ERRORS(result);
-
-//     CHECK_EQ("A", toString(requireType("f")));
-// }
 
 TEST_CASE_FIXTURE(Fixture, "cyclic_follow")
 {
@@ -685,7 +662,11 @@ TEST_CASE_FIXTURE(Fixture, "no_stack_overflow_from_isoptional")
 
     std::optional<TypeFun> t0 = getMainModule()->getModuleScope()->lookupType("t0");
     REQUIRE(t0);
-    CHECK_EQ("*unknown*", toString(t0->type));
+
+    if (FFlag::LuauSpecialTypesAsterisked)
+        CHECK_EQ("*error-type*", toString(t0->type));
+    else
+        CHECK_EQ("<error-type>", toString(t0->type));
 
     auto it = std::find_if(result.errors.begin(), result.errors.end(), [](TypeError& err) {
         return get<OccursCheckFailed>(err);
@@ -950,8 +931,6 @@ end
 
 TEST_CASE_FIXTURE(Fixture, "cli_50041_committing_txnlog_in_apollo_client_error")
 {
-    ScopedFastFlag subtypingVariance{"LuauTableSubtypingVariance2", true};
-
     CheckResult result = check(R"(
         --!strict
         --!nolint
@@ -991,7 +970,6 @@ TEST_CASE_FIXTURE(Fixture, "cli_50041_committing_txnlog_in_apollo_client_error")
 TEST_CASE_FIXTURE(Fixture, "type_infer_recursion_limit_no_ice")
 {
     ScopedFastInt sfi("LuauTypeInferRecursionLimit", 2);
-    ScopedFastFlag sff{"LuauRecursionLimitException", true};
 
     CheckResult result = check(R"(
         function complex()
@@ -1067,6 +1045,29 @@ TEST_CASE_FIXTURE(Fixture, "do_not_bind_a_free_table_to_a_union_containing_that_
             return q or {}
         end
     )");
+}
+
+TEST_CASE_FIXTURE(Fixture, "types stored in astResolvedTypes")
+{
+    CheckResult result = check(R"(
+type alias = typeof("hello")
+local function foo(param: alias)
+end
+    )");
+
+    auto node = findNodeAtPosition(*getMainSourceModule(), {2, 16});
+    auto ty = lookupType("alias");
+    REQUIRE(node);
+    REQUIRE(node->is<AstExprFunction>());
+    REQUIRE(ty);
+
+    auto func = node->as<AstExprFunction>();
+    REQUIRE(func->args.size == 1);
+
+    auto arg = *func->args.begin();
+    auto annotation = arg->annotation;
+
+    CHECK_EQ(*getMainModule()->astResolvedTypes.find(annotation), *ty);
 }
 
 TEST_SUITE_END();

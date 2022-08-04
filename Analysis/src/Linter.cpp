@@ -1433,7 +1433,7 @@ private:
     const char* checkStringFormat(const char* data, size_t size)
     {
         const char* flags = "-+ #0";
-        const char* options = "cdiouxXeEfgGqs";
+        const char* options = "cdiouxXeEfgGqs*";
 
         for (size_t i = 0; i < size; ++i)
         {
@@ -2282,7 +2282,7 @@ private:
     size_t getReturnCount(TypeId ty)
     {
         if (auto ftv = get<FunctionTypeVar>(ty))
-            return size(ftv->retType);
+            return size(ftv->retTypes);
 
         if (auto itv = get<IntersectionTypeVar>(ty))
         {
@@ -2291,7 +2291,7 @@ private:
 
             for (TypeId part : itv->parts)
                 if (auto ftv = get<FunctionTypeVar>(follow(part)))
-                    result = std::max(result, size(ftv->retType));
+                    result = std::max(result, size(ftv->retTypes));
 
             return result;
         }
@@ -2688,6 +2688,21 @@ static void lintComments(LintContext& context, const std::vector<HotComment>& ho
                 else
                     seenMode = true;
             }
+            else if (first == "optimize")
+            {
+                size_t notspace = hc.content.find_first_not_of(" \t", space);
+
+                if (space == std::string::npos || notspace == std::string::npos)
+                    emitWarning(context, LintWarning::Code_CommentDirective, hc.location, "optimize directive requires an optimization level");
+                else
+                {
+                    const char* level = hc.content.c_str() + notspace;
+
+                    if (strcmp(level, "0") && strcmp(level, "1") && strcmp(level, "2"))
+                        emitWarning(context, LintWarning::Code_CommentDirective, hc.location,
+                            "optimize directive uses unknown optimization level '%s', 0..2 expected", level);
+                }
+            }
             else
             {
                 static const char* kHotComments[] = {
@@ -2695,6 +2710,7 @@ static void lintComments(LintContext& context, const std::vector<HotComment>& ho
                     "nocheck",
                     "nonstrict",
                     "strict",
+                    "optimize",
                 };
 
                 if (const char* suggestion = fuzzyMatch(first, kHotComments, std::size(kHotComments)))

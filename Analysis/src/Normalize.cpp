@@ -5,7 +5,6 @@
 #include <algorithm>
 
 #include "Luau/Clone.h"
-#include "Luau/Substitution.h"
 #include "Luau/Unifier.h"
 #include "Luau/VisitTypeVar.h"
 
@@ -15,7 +14,9 @@ LUAU_FASTFLAGVARIABLE(DebugLuauCopyBeforeNormalizing, false)
 LUAU_FASTINTVARIABLE(LuauNormalizeIterationLimit, 1200);
 LUAU_FASTFLAGVARIABLE(LuauNormalizeCombineTableFix, false);
 LUAU_FASTFLAGVARIABLE(LuauNormalizeFlagIsConservative, false);
-LUAU_FASTFLAGVARIABLE(LuauNormalizeCombineEqFix, false);
+LUAU_FASTFLAGVARIABLE(LuauFixNormalizationOfCyclicUnions, false);
+LUAU_FASTFLAG(LuauUnknownAndNeverType)
+LUAU_FASTFLAG(LuauQuantifyConstrained)
 
 namespace Luau
 {
@@ -23,219 +24,33 @@ namespace Luau
 namespace
 {
 
-struct Replacer : Substitution
+struct Replacer
 {
+    TypeArena* arena;
     TypeId sourceType;
     TypeId replacedType;
-    DenseHashMap<TypeId, TypeId> replacedTypes{nullptr};
-    DenseHashMap<TypePackId, TypePackId> replacedPacks{nullptr};
+    DenseHashMap<TypeId, TypeId> newTypes;
 
     Replacer(TypeArena* arena, TypeId sourceType, TypeId replacedType)
-        : Substitution(TxnLog::empty(), arena)
+        : arena(arena)
         , sourceType(sourceType)
         , replacedType(replacedType)
+        , newTypes(nullptr)
     {
-    }
-
-    bool isDirty(TypeId ty) override
-    {
-        if (!sourceType)
-            return false;
-
-        auto vecHasSourceType = [sourceType = sourceType](const auto& vec) {
-            return end(vec) != std::find(begin(vec), end(vec), sourceType);
-        };
-
-        // Walk every kind of TypeVar and find pointers to sourceType
-        if (auto t = get<FreeTypeVar>(ty))
-            return false;
-        else if (auto t = get<GenericTypeVar>(ty))
-            return false;
-        else if (auto t = get<ErrorTypeVar>(ty))
-            return false;
-        else if (auto t = get<PrimitiveTypeVar>(ty))
-            return false;
-        else if (auto t = get<ConstrainedTypeVar>(ty))
-            return vecHasSourceType(t->parts);
-        else if (auto t = get<SingletonTypeVar>(ty))
-            return false;
-        else if (auto t = get<FunctionTypeVar>(ty))
-        {
-            if (vecHasSourceType(t->generics))
-                return true;
-
-            return false;
-        }
-        else if (auto t = get<TableTypeVar>(ty))
-        {
-            if (t->boundTo)
-                return *t->boundTo == sourceType;
-
-            for (const auto& [_name, prop] : t->props)
-            {
-                if (prop.type == sourceType)
-                    return true;
-            }
-
-            if (auto indexer = t->indexer)
-            {
-                if (indexer->indexType == sourceType || indexer->indexResultType == sourceType)
-                    return true;
-            }
-
-            if (vecHasSourceType(t->instantiatedTypeParams))
-                return true;
-
-            return false;
-        }
-        else if (auto t = get<MetatableTypeVar>(ty))
-            return t->table == sourceType || t->metatable == sourceType;
-        else if (auto t = get<ClassTypeVar>(ty))
-            return false;
-        else if (auto t = get<AnyTypeVar>(ty))
-            return false;
-        else if (auto t = get<UnionTypeVar>(ty))
-            return vecHasSourceType(t->options);
-        else if (auto t = get<IntersectionTypeVar>(ty))
-            return vecHasSourceType(t->parts);
-        else if (auto t = get<LazyTypeVar>(ty))
-            return false;
-
-        LUAU_ASSERT(!"Luau::Replacer::isDirty internal error: Unknown TypeVar type");
-        LUAU_UNREACHABLE();
-    }
-
-    bool isDirty(TypePackId tp) override
-    {
-        if (auto it = replacedPacks.find(tp))
-            return false;
-
-        if (auto pack = get<TypePack>(tp))
-        {
-            for (TypeId ty : pack->head)
-            {
-                if (ty == sourceType)
-                    return true;
-            }
-            return false;
-        }
-        else if (auto vtp = get<VariadicTypePack>(tp))
-            return vtp->ty == sourceType;
-        else
-            return false;
-    }
-
-    TypeId clean(TypeId ty) override
-    {
-        LUAU_ASSERT(sourceType && replacedType);
-
-        // Walk every kind of TypeVar and create a copy with sourceType replaced by replacedType
-        // Before returning, memoize the result for later use.
-
-        // Helpfully, Substitution::clone() only shallow-clones the kinds of types that we care to work with.  This
-        // function returns the identity for things like primitives.
-        TypeId res = clone(ty);
-
-        if (auto t = get<FreeTypeVar>(res))
-            LUAU_ASSERT(!"Impossible");
-        else if (auto t = get<GenericTypeVar>(res))
-            LUAU_ASSERT(!"Impossible");
-        else if (auto t = get<ErrorTypeVar>(res))
-            LUAU_ASSERT(!"Impossible");
-        else if (auto t = get<PrimitiveTypeVar>(res))
-            LUAU_ASSERT(!"Impossible");
-        else if (auto t = getMutable<ConstrainedTypeVar>(res))
-        {
-            for (TypeId& part : t->parts)
-            {
-                if (part == sourceType)
-                    part = replacedType;
-            }
-        }
-        else if (auto t = get<SingletonTypeVar>(res))
-            LUAU_ASSERT(!"Impossible");
-        else if (auto t = getMutable<FunctionTypeVar>(res))
-        {
-            // The constituent typepacks are cleaned separately.  We just need to walk the generics array.
-            for (TypeId& g : t->generics)
-            {
-                if (g == sourceType)
-                    g = replacedType;
-            }
-        }
-        else if (auto t = getMutable<TableTypeVar>(res))
-        {
-            for (auto& [_key, prop] : t->props)
-            {
-                if (prop.type == sourceType)
-                    prop.type = replacedType;
-            }
-        }
-        else if (auto t = getMutable<MetatableTypeVar>(res))
-        {
-            if (t->table == sourceType)
-                t->table = replacedType;
-            if (t->metatable == sourceType)
-                t->table = replacedType;
-        }
-        else if (auto t = get<ClassTypeVar>(res))
-            LUAU_ASSERT(!"Impossible");
-        else if (auto t = get<AnyTypeVar>(res))
-            LUAU_ASSERT(!"Impossible");
-        else if (auto t = getMutable<UnionTypeVar>(res))
-        {
-            for (TypeId& option : t->options)
-            {
-                if (option == sourceType)
-                    option = replacedType;
-            }
-        }
-        else if (auto t = getMutable<IntersectionTypeVar>(res))
-        {
-            for (TypeId& part : t->parts)
-            {
-                if (part == sourceType)
-                    part = replacedType;
-            }
-        }
-        else if (auto t = get<LazyTypeVar>(res))
-            LUAU_ASSERT(!"Impossible");
-        else
-            LUAU_ASSERT(!"Luau::Replacer::clean internal error: Unknown TypeVar type");
-
-        replacedTypes[ty] = res;
-        return res;
-    }
-
-    TypePackId clean(TypePackId tp) override
-    {
-        TypePackId res = clone(tp);
-
-        if (auto pack = getMutable<TypePack>(res))
-        {
-            for (TypeId& type : pack->head)
-            {
-                if (type == sourceType)
-                    type = replacedType;
-            }
-        }
-        else if (auto vtp = getMutable<VariadicTypePack>(res))
-        {
-            if (vtp->ty == sourceType)
-                vtp->ty = replacedType;
-        }
-
-        replacedPacks[tp] = res;
-        return res;
     }
 
     TypeId smartClone(TypeId t)
     {
-        std::optional<TypeId> res = replace(t);
-        LUAU_ASSERT(res.has_value()); // TODO think about this
-        if (*res == t)
-            return clone(t);
-        return *res;
+        t = follow(t);
+        TypeId* res = newTypes.find(t);
+        if (res)
+            return *res;
+
+        TypeId result = shallowClone(t, *arena, TxnLog::empty());
+        newTypes[t] = result;
+        newTypes[result] = result;
+
+        return result;
     }
 };
 
@@ -249,6 +64,18 @@ bool isSubtype(TypeId subTy, TypeId superTy, InternalErrorReporter& ice)
     u.anyIsTop = true;
 
     u.tryUnify(subTy, superTy);
+    const bool ok = u.errors.empty() && u.log.empty();
+    return ok;
+}
+
+bool isSubtype(TypePackId subPack, TypePackId superPack, InternalErrorReporter& ice)
+{
+    UnifierSharedState sharedState{&ice};
+    TypeArena arena;
+    Unifier u{&arena, Mode::Strict, Location{}, Covariant, sharedState};
+    u.anyIsTop = true;
+
+    u.tryUnify(subPack, superPack);
     const bool ok = u.errors.empty() && u.log.empty();
     return ok;
 }
@@ -356,7 +183,6 @@ struct Normalize final : TypeVarVisitor
     {
         if (!ty->normal)
             asMutable(ty)->normal = true;
-
         return false;
     }
 
@@ -367,9 +193,24 @@ struct Normalize final : TypeVarVisitor
         return false;
     }
 
+    bool visit(TypeId ty, const UnknownTypeVar&) override
+    {
+        if (!ty->normal)
+            asMutable(ty)->normal = true;
+        return false;
+    }
+
+    bool visit(TypeId ty, const NeverTypeVar&) override
+    {
+        if (!ty->normal)
+            asMutable(ty)->normal = true;
+        return false;
+    }
+
     bool visit(TypeId ty, const ConstrainedTypeVar& ctvRef) override
     {
         CHECK_ITERATION_LIMIT(false);
+        LUAU_ASSERT(!ty->normal);
 
         ConstrainedTypeVar* ctv = const_cast<ConstrainedTypeVar*>(&ctvRef);
 
@@ -381,14 +222,21 @@ struct Normalize final : TypeVarVisitor
 
         std::vector<TypeId> newParts = normalizeUnion(parts);
 
-        const bool normal = areNormal(newParts, seen, ice);
-
-        if (newParts.size() == 1)
-            *asMutable(ty) = BoundTypeVar{newParts[0]};
+        if (FFlag::LuauQuantifyConstrained)
+        {
+            ctv->parts = std::move(newParts);
+        }
         else
-            *asMutable(ty) = UnionTypeVar{std::move(newParts)};
+        {
+            const bool normal = areNormal(newParts, seen, ice);
 
-        asMutable(ty)->normal = normal;
+            if (newParts.size() == 1)
+                *asMutable(ty) = BoundTypeVar{newParts[0]};
+            else
+                *asMutable(ty) = UnionTypeVar{std::move(newParts)};
+
+            asMutable(ty)->normal = normal;
+        }
 
         return false;
     }
@@ -401,9 +249,9 @@ struct Normalize final : TypeVarVisitor
             return false;
 
         traverse(ftv.argTypes);
-        traverse(ftv.retType);
+        traverse(ftv.retTypes);
 
-        asMutable(ty)->normal = areNormal(ftv.argTypes, seen, ice) && areNormal(ftv.retType, seen, ice);
+        asMutable(ty)->normal = areNormal(ftv.argTypes, seen, ice) && areNormal(ftv.retTypes, seen, ice);
 
         return false;
     }
@@ -445,7 +293,14 @@ struct Normalize final : TypeVarVisitor
             checkNormal(ttv.indexer->indexResultType);
         }
 
-        asMutable(ty)->normal = normal;
+        // An unsealed table can never be normal, ditto for free tables iff the type it is bound to is also not normal.
+        if (FFlag::LuauQuantifyConstrained)
+        {
+            if (ttv.state == TableState::Generic || ttv.state == TableState::Sealed || (ttv.state == TableState::Free && follow(ty)->normal))
+                asMutable(ty)->normal = normal;
+        }
+        else
+            asMutable(ty)->normal = normal;
 
         return false;
     }
@@ -486,13 +341,19 @@ struct Normalize final : TypeVarVisitor
             return false;
 
         UnionTypeVar* utv = &const_cast<UnionTypeVar&>(utvRef);
-        std::vector<TypeId> options = std::move(utv->options);
+
+        // TODO: Clip tempOptions and optionsRef when clipping FFlag::LuauFixNormalizationOfCyclicUnions
+        std::vector<TypeId> tempOptions;
+        if (!FFlag::LuauFixNormalizationOfCyclicUnions)
+            tempOptions = std::move(utv->options);
+
+        std::vector<TypeId>& optionsRef = FFlag::LuauFixNormalizationOfCyclicUnions ? utv->options : tempOptions;
 
         // We might transmute, so it's not safe to rely on the builtin traversal logic of visitTypeVar
-        for (TypeId option : options)
+        for (TypeId option : optionsRef)
             traverse(option);
 
-        std::vector<TypeId> newOptions = normalizeUnion(options);
+        std::vector<TypeId> newOptions = normalizeUnion(optionsRef);
 
         const bool normal = areNormal(newOptions, seen, ice);
 
@@ -517,51 +378,106 @@ struct Normalize final : TypeVarVisitor
 
         IntersectionTypeVar* itv = &const_cast<IntersectionTypeVar&>(itvRef);
 
-        std::vector<TypeId> oldParts = std::move(itv->parts);
-
-        for (TypeId part : oldParts)
-            traverse(part);
-
-        std::vector<TypeId> tables;
-        for (TypeId part : oldParts)
+        if (FFlag::LuauFixNormalizationOfCyclicUnions)
         {
-            part = follow(part);
-            if (get<TableTypeVar>(part))
-                tables.push_back(part);
-            else
-            {
-                Replacer replacer{&arena, nullptr, nullptr}; // FIXME this is super super WEIRD
-                combineIntoIntersection(replacer, itv, part);
-            }
-        }
+            std::vector<TypeId> oldParts = itv->parts;
+            IntersectionTypeVar newIntersection;
 
-        // Don't allocate a new table if there's just one in the intersection.
-        if (tables.size() == 1)
-            itv->parts.push_back(tables[0]);
-        else if (!tables.empty())
-        {
-            const TableTypeVar* first = get<TableTypeVar>(tables[0]);
-            LUAU_ASSERT(first);
+            for (TypeId part : oldParts)
+                traverse(part);
 
-            TypeId newTable = arena.addType(TableTypeVar{first->state, first->level});
-            TableTypeVar* ttv = getMutable<TableTypeVar>(newTable);
-            for (TypeId part : tables)
+            std::vector<TypeId> tables;
+            for (TypeId part : oldParts)
             {
-                // Intuition: If combineIntoTable() needs to clone a table, any references to 'part' are cyclic and need
-                // to be rewritten to point at 'newTable' in the clone.
-                Replacer replacer{&arena, part, newTable};
-                combineIntoTable(replacer, ttv, part);
+                part = follow(part);
+                if (get<TableTypeVar>(part))
+                    tables.push_back(part);
+                else
+                {
+                    Replacer replacer{&arena, nullptr, nullptr}; // FIXME this is super super WEIRD
+                    combineIntoIntersection(replacer, &newIntersection, part);
+                }
             }
 
-            itv->parts.push_back(newTable);
+            // Don't allocate a new table if there's just one in the intersection.
+            if (tables.size() == 1)
+                newIntersection.parts.push_back(tables[0]);
+            else if (!tables.empty())
+            {
+                const TableTypeVar* first = get<TableTypeVar>(tables[0]);
+                LUAU_ASSERT(first);
+
+                TypeId newTable = arena.addType(TableTypeVar{first->state, first->level});
+                TableTypeVar* ttv = getMutable<TableTypeVar>(newTable);
+                for (TypeId part : tables)
+                {
+                    // Intuition: If combineIntoTable() needs to clone a table, any references to 'part' are cyclic and need
+                    // to be rewritten to point at 'newTable' in the clone.
+                    Replacer replacer{&arena, part, newTable};
+                    combineIntoTable(replacer, ttv, part);
+                }
+
+                newIntersection.parts.push_back(newTable);
+            }
+
+            itv->parts = std::move(newIntersection.parts);
+
+            asMutable(ty)->normal = areNormal(itv->parts, seen, ice);
+
+            if (itv->parts.size() == 1)
+            {
+                TypeId part = itv->parts[0];
+                *asMutable(ty) = BoundTypeVar{part};
+            }
         }
-
-        asMutable(ty)->normal = areNormal(itv->parts, seen, ice);
-
-        if (itv->parts.size() == 1)
+        else
         {
-            TypeId part = itv->parts[0];
-            *asMutable(ty) = BoundTypeVar{part};
+            std::vector<TypeId> oldParts = std::move(itv->parts);
+
+            for (TypeId part : oldParts)
+                traverse(part);
+
+            std::vector<TypeId> tables;
+            for (TypeId part : oldParts)
+            {
+                part = follow(part);
+                if (get<TableTypeVar>(part))
+                    tables.push_back(part);
+                else
+                {
+                    Replacer replacer{&arena, nullptr, nullptr}; // FIXME this is super super WEIRD
+                    combineIntoIntersection(replacer, itv, part);
+                }
+            }
+
+            // Don't allocate a new table if there's just one in the intersection.
+            if (tables.size() == 1)
+                itv->parts.push_back(tables[0]);
+            else if (!tables.empty())
+            {
+                const TableTypeVar* first = get<TableTypeVar>(tables[0]);
+                LUAU_ASSERT(first);
+
+                TypeId newTable = arena.addType(TableTypeVar{first->state, first->level});
+                TableTypeVar* ttv = getMutable<TableTypeVar>(newTable);
+                for (TypeId part : tables)
+                {
+                    // Intuition: If combineIntoTable() needs to clone a table, any references to 'part' are cyclic and need
+                    // to be rewritten to point at 'newTable' in the clone.
+                    Replacer replacer{&arena, part, newTable};
+                    combineIntoTable(replacer, ttv, part);
+                }
+
+                itv->parts.push_back(newTable);
+            }
+
+            asMutable(ty)->normal = areNormal(itv->parts, seen, ice);
+
+            if (itv->parts.size() == 1)
+            {
+                TypeId part = itv->parts[0];
+                *asMutable(ty) = BoundTypeVar{part};
+            }
         }
 
         return false;
@@ -575,7 +491,13 @@ struct Normalize final : TypeVarVisitor
         std::vector<TypeId> result;
 
         for (TypeId part : options)
+        {
+            // AnyTypeVar always win the battle no matter what we do, so we're done.
+            if (FFlag::LuauUnknownAndNeverType && get<AnyTypeVar>(follow(part)))
+                return {part};
+
             combineIntoUnion(result, part);
+        }
 
         return result;
     }
@@ -586,7 +508,17 @@ struct Normalize final : TypeVarVisitor
         if (auto utv = get<UnionTypeVar>(ty))
         {
             for (TypeId t : utv)
+            {
+                // AnyTypeVar always win the battle no matter what we do, so we're done.
+                if (FFlag::LuauUnknownAndNeverType && get<AnyTypeVar>(t))
+                {
+                    result = {t};
+                    return;
+                }
+
                 combineIntoUnion(result, t);
+            }
+
             return;
         }
 
@@ -720,6 +652,24 @@ struct Normalize final : TypeVarVisitor
                 table->props.insert({propName, prop});
         }
 
+        if (FFlag::LuauFixNormalizationOfCyclicUnions)
+        {
+            if (tyTable->indexer)
+            {
+                if (table->indexer)
+                {
+                    table->indexer->indexType = combine(replacer, replacer.smartClone(tyTable->indexer->indexType), table->indexer->indexType);
+                    table->indexer->indexResultType =
+                        combine(replacer, replacer.smartClone(tyTable->indexer->indexResultType), table->indexer->indexResultType);
+                }
+                else
+                {
+                    table->indexer =
+                        TableIndexer{replacer.smartClone(tyTable->indexer->indexType), replacer.smartClone(tyTable->indexer->indexResultType)};
+                }
+            }
+        }
+
         table->state = combineTableStates(table->state, tyTable->state);
         table->level = max(table->level, tyTable->level);
     }
@@ -730,8 +680,7 @@ struct Normalize final : TypeVarVisitor
      */
     TypeId combine(Replacer& replacer, TypeId a, TypeId b)
     {
-        if (FFlag::LuauNormalizeCombineEqFix)
-            b = follow(b);
+        b = follow(b);
 
         if (FFlag::LuauNormalizeCombineTableFix && a == b)
             return a;
@@ -751,7 +700,7 @@ struct Normalize final : TypeVarVisitor
         }
         else if (auto ttv = getMutable<TableTypeVar>(a))
         {
-            if (FFlag::LuauNormalizeCombineTableFix && !get<TableTypeVar>(FFlag::LuauNormalizeCombineEqFix ? b : follow(b)))
+            if (FFlag::LuauNormalizeCombineTableFix && !get<TableTypeVar>(b))
                 return arena.addType(IntersectionTypeVar{{a, b}});
             combineIntoTable(replacer, ttv, b);
             return a;

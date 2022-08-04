@@ -17,6 +17,8 @@
 
 static const char* mainModuleName = "MainModule";
 
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+
 namespace Luau
 {
 
@@ -193,12 +195,15 @@ ParseResult Fixture::matchParseError(const std::string& source, const std::strin
     sourceModule.reset(new SourceModule);
     ParseResult result = Parser::parse(source.c_str(), source.length(), *sourceModule->names, *sourceModule->allocator, options);
 
-    REQUIRE_MESSAGE(!result.errors.empty(), "Expected a parse error in '" << source << "'");
+    CHECK_MESSAGE(!result.errors.empty(), "Expected a parse error in '" << source << "'");
 
-    CHECK_EQ(result.errors.front().getMessage(), message);
+    if (!result.errors.empty())
+    {
+        CHECK_EQ(result.errors.front().getMessage(), message);
 
-    if (location)
-        CHECK_EQ(result.errors.front().getLocation(), *location);
+        if (location)
+            CHECK_EQ(result.errors.front().getLocation(), *location);
+    }
 
     return result;
 }
@@ -211,11 +216,14 @@ ParseResult Fixture::matchParseErrorPrefix(const std::string& source, const std:
     sourceModule.reset(new SourceModule);
     ParseResult result = Parser::parse(source.c_str(), source.length(), *sourceModule->names, *sourceModule->allocator, options);
 
-    REQUIRE_MESSAGE(!result.errors.empty(), "Expected a parse error in '" << source << "'");
+    CHECK_MESSAGE(!result.errors.empty(), "Expected a parse error in '" << source << "'");
 
-    const std::string& message = result.errors.front().getMessage();
-    CHECK_GE(message.length(), prefix.length());
-    CHECK_EQ(prefix, message.substr(0, prefix.size()));
+    if (!result.errors.empty())
+    {
+        const std::string& message = result.errors.front().getMessage();
+        CHECK_GE(message.length(), prefix.length());
+        CHECK_EQ(prefix, message.substr(0, prefix.size()));
+    }
 
     return result;
 }
@@ -249,7 +257,10 @@ std::optional<TypeId> Fixture::getType(const std::string& name)
     ModulePtr module = getMainModule();
     REQUIRE(module);
 
-    return lookupName(module->getModuleScope(), name);
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        return linearSearchForBinding(module->getModuleScope().get(), name.c_str());
+    else
+        return lookupName(module->getModuleScope(), name);
 }
 
 TypeId Fixture::requireType(const std::string& name)
@@ -340,7 +351,7 @@ void Fixture::dumpErrors(std::ostream& os, const std::vector<TypeError>& errors)
         if (error.location.begin.line >= lines.size())
         {
             os << "\tSource not available?" << std::endl;
-            return;
+            continue;
         }
 
         std::string_view theLine = lines[error.location.begin.line];
@@ -421,6 +432,14 @@ BuiltinsFixture::BuiltinsFixture(bool freeze, bool prepareAutocomplete)
     Luau::freeze(frontend.typeCheckerForAutocomplete.globalTypes);
 }
 
+ConstraintGraphBuilderFixture::ConstraintGraphBuilderFixture()
+    : Fixture()
+    , cgb(mainModuleName, &arena, NotNull(&ice), frontend.getGlobalScope())
+    , forceTheFlag{"DebugLuauDeferredConstraintResolution", true}
+{
+    BlockedTypeVar::nextIndex = 0;
+}
+
 ModuleName fromString(std::string_view name)
 {
     return ModuleName(name);
@@ -458,6 +477,29 @@ std::optional<TypeId> lookupName(ScopePtr scope, const std::string& name)
         return binding->typeId;
     else
         return std::nullopt;
+}
+
+std::optional<TypeId> linearSearchForBinding(Scope* scope, const char* name)
+{
+    while (scope)
+    {
+        for (const auto& [n, ty] : scope->bindings)
+        {
+            if (n.astName() == name)
+                return ty.typeId;
+        }
+
+        scope = scope->parent.get();
+    }
+
+    return std::nullopt;
+}
+
+void dump(const std::vector<Constraint>& constraints)
+{
+    ToStringOptions opts;
+    for (const auto& c : constraints)
+        printf("%s\n", toString(c, opts).c_str());
 }
 
 } // namespace Luau

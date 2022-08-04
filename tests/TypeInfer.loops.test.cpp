@@ -13,6 +13,8 @@
 
 using namespace Luau;
 
+LUAU_FASTFLAG(LuauSpecialTypesAsterisked)
+
 TEST_SUITE_BEGIN("TypeInferLoops");
 
 TEST_CASE_FIXTURE(Fixture, "for_loop")
@@ -78,8 +80,6 @@ TEST_CASE_FIXTURE(Fixture, "for_in_with_an_iterator_of_type_any")
 
 TEST_CASE_FIXTURE(Fixture, "for_in_loop_should_fail_with_non_function_iterator")
 {
-    ScopedFastFlag luauDoNotRelyOnNextBinding{"LuauDoNotRelyOnNextBinding", true};
-
     CheckResult result = check(R"(
         local foo = "bar"
         for i, v in foo do
@@ -144,7 +144,10 @@ TEST_CASE_FIXTURE(Fixture, "for_in_loop_on_error")
     CHECK_EQ(2, result.errors.size());
 
     TypeId p = requireType("p");
-    CHECK_EQ("*unknown*", toString(p));
+    if (FFlag::LuauSpecialTypesAsterisked)
+        CHECK_EQ("*error-type*", toString(p));
+    else
+        CHECK_EQ("<error-type>", toString(p));
 }
 
 TEST_CASE_FIXTURE(Fixture, "for_in_loop_on_non_function")
@@ -488,8 +491,6 @@ TEST_CASE_FIXTURE(Fixture, "fuzz_fail_missing_instantitation_follow")
 
 TEST_CASE_FIXTURE(Fixture, "loop_iter_basic")
 {
-    ScopedFastFlag sff{"LuauTypecheckIter", true};
-
     CheckResult result = check(R"(
         local t: {string} = {}
         local key
@@ -508,8 +509,6 @@ TEST_CASE_FIXTURE(Fixture, "loop_iter_basic")
 
 TEST_CASE_FIXTURE(Fixture, "loop_iter_trailing_nil")
 {
-    ScopedFastFlag sff{"LuauTypecheckIter", true};
-
     CheckResult result = check(R"(
         local t: {string} = {}
         local extra
@@ -522,10 +521,8 @@ TEST_CASE_FIXTURE(Fixture, "loop_iter_trailing_nil")
     CHECK_EQ(*typeChecker.nilType, *requireType("extra"));
 }
 
-TEST_CASE_FIXTURE(Fixture, "loop_iter_no_indexer")
+TEST_CASE_FIXTURE(Fixture, "loop_iter_no_indexer_strict")
 {
-    ScopedFastFlag sff{"LuauTypecheckIter", true};
-
     CheckResult result = check(R"(
         local t = {}
         for k, v in t do
@@ -539,10 +536,19 @@ TEST_CASE_FIXTURE(Fixture, "loop_iter_no_indexer")
     CHECK_EQ("Cannot iterate over a table without indexer", ge->message);
 }
 
+TEST_CASE_FIXTURE(Fixture, "loop_iter_no_indexer_nonstrict")
+{
+    CheckResult result = check(Mode::Nonstrict, R"(
+        local t = {}
+        for k, v in t do
+        end
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(0, result);
+}
+
 TEST_CASE_FIXTURE(BuiltinsFixture, "loop_iter_iter_metamethod")
 {
-    ScopedFastFlag sff{"LuauTypecheckIter", true};
-
     CheckResult result = check(R"(
         local t = {}
         setmetatable(t, { __iter = function(o) return next, o.children end })

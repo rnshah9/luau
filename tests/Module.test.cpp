@@ -102,7 +102,7 @@ TEST_CASE_FIXTURE(Fixture, "deepClone_cyclic_table")
     const FunctionTypeVar* ftv = get<FunctionTypeVar>(methodType);
     REQUIRE(ftv != nullptr);
 
-    std::optional<TypeId> methodReturnType = first(ftv->retType);
+    std::optional<TypeId> methodReturnType = first(ftv->retTypes);
     REQUIRE(methodReturnType);
 
     CHECK_EQ(methodReturnType, counterCopy);
@@ -279,7 +279,6 @@ TEST_CASE_FIXTURE(Fixture, "clone_recursion_limit")
     int limit = 400;
 #endif
     ScopedFastInt luauTypeCloneRecursionLimit{"LuauTypeCloneRecursionLimit", limit};
-    ScopedFastFlag sff{"LuauRecursionLimitException", true};
 
     TypeArena src;
 
@@ -298,6 +297,24 @@ TEST_CASE_FIXTURE(Fixture, "clone_recursion_limit")
     CloneState cloneState;
 
     CHECK_THROWS_AS(clone(table, dest, cloneState), RecursionLimitException);
+}
+
+TEST_CASE_FIXTURE(Fixture, "any_persistance_does_not_leak")
+{
+    fileResolver.source["Module/A"] = R"(
+export type A = B
+type B = A
+    )";
+
+    FrontendOptions opts;
+    opts.retainFullTypeGraphs = false;
+    CheckResult result = frontend.check("Module/A", opts);
+    LUAU_REQUIRE_ERRORS(result);
+
+    auto mod = frontend.moduleResolver.getModule("Module/A");
+    auto it = mod->getModuleScope()->exportedTypeBindings.find("A");
+    REQUIRE(it != mod->getModuleScope()->exportedTypeBindings.end());
+    CHECK(toString(it->second.type) == "any");
 }
 
 TEST_SUITE_END();

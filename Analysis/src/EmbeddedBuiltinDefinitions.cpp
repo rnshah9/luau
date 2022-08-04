@@ -1,13 +1,18 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/BuiltinDefinitions.h"
 
+LUAU_FASTFLAG(LuauUnknownAndNeverType)
+
 namespace Luau
 {
 
 static const std::string kBuiltinDefinitionLuaSrc = R"BUILTIN_SRC(
 
 declare bit32: {
-    -- band, bor, bxor, and btest are declared in C++
+    band: (...number) -> number,
+    bor: (...number) -> number,
+    bxor: (...number) -> number,
+    btest: (number, ...number) -> boolean,
     rrotate: (number, number) -> number,
     lrotate: (number, number) -> number,
     lshift: (number, number) -> number,
@@ -50,7 +55,8 @@ declare math: {
     asin: (number) -> number,
     atan2: (number, number) -> number,
 
-    -- min and max are declared in C++.
+    min: (number, ...number) -> number,
+    max: (number, ...number) -> number,
 
     pi: number,
     huge: number,
@@ -110,14 +116,13 @@ declare function typeof<T>(value: T): string
 -- `assert` has a magic function attached that will give more detailed type information
 declare function assert<T>(value: T, errorMessage: string?): T
 
-declare function error<T>(message: T, level: number?)
-
 declare function tostring<T>(value: T): string
 declare function tonumber<T>(value: T, radix: number?): number?
 
 declare function rawequal<T1, T2>(a: T1, b: T2): boolean
 declare function rawget<K, V>(tab: {[K]: V}, k: K): V
 declare function rawset<K, V>(tab: {[K]: V}, k: K, v: V): {[K]: V}
+declare function rawlen<K, V>(obj: {[K]: V} | string): number
 
 declare function setfenv<T..., R...>(target: number | (T...) -> R..., env: {[string]: any}): ((T...) -> R...)?
 
@@ -179,7 +184,7 @@ declare debug: {
 }
 
 declare utf8: {
-    char: (number, ...number) -> string,
+    char: (...number) -> string,
     charpattern: string,
     codes: (string) -> ((string, number) -> (number, number), string, number),
     -- FIXME
@@ -198,7 +203,15 @@ declare function unpack<V>(tab: {V}, i: number?, j: number?): ...V
 
 std::string getBuiltinDefinitionSource()
 {
-    return kBuiltinDefinitionLuaSrc;
+
+    std::string result = kBuiltinDefinitionLuaSrc;
+
+    if (FFlag::LuauUnknownAndNeverType)
+        result += "declare function error<T>(message: T, level: number?): never\n";
+    else
+        result += "declare function error<T>(message: T, level: number?)\n";
+
+    return result;
 }
 
 } // namespace Luau

@@ -24,7 +24,7 @@ std::optional<TypeId> findMetatableEntry(ErrorVec& errors, TypeId type, std::str
     const TableTypeVar* mtt = getTableType(unwrapped);
     if (!mtt)
     {
-        errors.push_back(TypeError{location, GenericError{"Metatable was not a table."}});
+        errors.push_back(TypeError{location, GenericError{"Metatable was not a table"}});
         return std::nullopt;
     }
 
@@ -66,7 +66,7 @@ std::optional<TypeId> findTablePropertyRespectingMeta(ErrorVec& errors, TypeId t
         }
         else if (const auto& itf = get<FunctionTypeVar>(index))
         {
-            std::optional<TypeId> r = first(follow(itf->retType));
+            std::optional<TypeId> r = first(follow(itf->retTypes));
             if (!r)
                 return getSingletonTypes().nilType;
             else

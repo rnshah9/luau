@@ -1,10 +1,11 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
+#include "Luau/Error.h"
 #include "Luau/FileResolver.h"
 #include "Luau/ParseOptions.h"
-#include "Luau/Error.h"
 #include "Luau/ParseResult.h"
+#include "Luau/Scope.h"
 #include "Luau/TypeArena.h"
 
 #include <memory>
@@ -19,6 +20,9 @@ struct Module;
 
 using ScopePtr = std::shared_ptr<struct Scope>;
 using ModulePtr = std::shared_ptr<Module>;
+
+class AstType;
+class AstTypePack;
 
 /// Root of the AST of a parsed source file
 struct SourceModule
@@ -64,12 +68,15 @@ struct Module
     std::shared_ptr<Allocator> allocator;
     std::shared_ptr<AstNameTable> names;
 
-    std::vector<std::pair<Location, ScopePtr>> scopes; // never empty
+    std::vector<std::pair<Location, ScopePtr>> scopes;                 // never empty
 
     DenseHashMap<const AstExpr*, TypeId> astTypes{nullptr};
+    DenseHashMap<const AstExpr*, TypePackId> astTypePacks{nullptr};
     DenseHashMap<const AstExpr*, TypeId> astExpectedTypes{nullptr};
     DenseHashMap<const AstExpr*, TypeId> astOriginalCallTypes{nullptr};
     DenseHashMap<const AstExpr*, TypeId> astOverloadResolvedTypes{nullptr};
+    DenseHashMap<const AstType*, TypeId> astResolvedTypes{nullptr};
+    DenseHashMap<const AstTypePack*, TypePackId> astResolvedTypePacks{nullptr};
 
     std::unordered_map<Name, TypeId> declaredGlobals;
     ErrorVec errors;

@@ -5,6 +5,7 @@
 #include "Luau/Module.h"
 #include "Luau/ModuleResolver.h"
 #include "Luau/RequireTracer.h"
+#include "Luau/Scope.h"
 #include "Luau/TypeInfer.h"
 #include "Luau/Variant.h"
 
@@ -66,7 +67,7 @@ struct SourceNode
     }
 
     ModuleName name;
-    std::unordered_set<ModuleName> requires;
+    std::unordered_set<ModuleName> requireSet;
     std::vector<std::pair<ModuleName, Location>> requireLocations;
     bool dirtySourceModule = true;
     bool dirtyModule = true;
@@ -126,13 +127,6 @@ struct Frontend
     CheckResult check(const ModuleName& name, std::optional<FrontendOptions> optionOverride = {}); // new shininess
     LintResult lint(const ModuleName& name, std::optional<LintOptions> enabledLintWarnings = {});
 
-    /** Lint some code that has no associated DataModel object
-     *
-     * Since this source fragment has no name, we cannot cache its AST.  Instead,
-     * we return it to the caller to use as they wish.
-     */
-    std::pair<SourceModule, LintResult> lintFragment(std::string_view source, std::optional<LintOptions> enabledLintWarnings = {});
-
     LintResult lint(const SourceModule& module, std::optional<LintOptions> enabledLintWarnings = {});
 
     bool isDirty(const ModuleName& name, bool forAutocomplete = false) const;
@@ -158,7 +152,11 @@ struct Frontend
     void registerBuiltinDefinition(const std::string& name, std::function<void(TypeChecker&, ScopePtr)>);
     void applyBuiltinDefinitionToEnvironment(const std::string& environmentName, const std::string& definitionName);
 
+    NotNull<Scope> getGlobalScope();
+
 private:
+    ModulePtr check(const SourceModule& sourceModule, Mode mode, const ScopePtr& environmentScope);
+
     std::pair<SourceNode*, SourceModule*> getSourceNode(CheckResult& checkResult, const ModuleName& name);
     SourceModule parse(const ModuleName& name, std::string_view src, const ParseOptions& parseOptions);
 
@@ -170,6 +168,8 @@ private:
 
     std::unordered_map<std::string, ScopePtr> environments;
     std::unordered_map<std::string, std::function<void(TypeChecker&, ScopePtr)>> builtinDefinitions;
+
+    std::unique_ptr<Scope> globalScope;
 
 public:
     FileResolver* fileResolver;
@@ -184,7 +184,7 @@ public:
 
     std::unordered_map<ModuleName, SourceNode> sourceNodes;
     std::unordered_map<ModuleName, SourceModule> sourceModules;
-    std::unordered_map<ModuleName, RequireTraceResult> requires;
+    std::unordered_map<ModuleName, RequireTraceResult> requireTrace;
 
     Stats stats = {};
 };

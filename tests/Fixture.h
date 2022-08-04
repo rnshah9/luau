@@ -8,6 +8,7 @@
 #include "Luau/Linter.h"
 #include "Luau/Location.h"
 #include "Luau/ModuleResolver.h"
+#include "Luau/Scope.h"
 #include "Luau/ToString.h"
 #include "Luau/TypeInfer.h"
 #include "Luau/TypeVar.h"
@@ -127,11 +128,13 @@ struct Fixture
     std::optional<TypeId> lookupImportedType(const std::string& moduleAlias, const std::string& name);
 
     ScopedFastFlag sff_DebugLuauFreezeArena;
+    ScopedFastFlag sff_UnknownNever{"LuauUnknownAndNeverType", true};
 
     TestFileResolver fileResolver;
     TestConfigResolver configResolver;
     std::unique_ptr<SourceModule> sourceModule;
     Frontend frontend;
+    InternalErrorReporter ice;
     TypeChecker& typeChecker;
 
     std::string decorateWithTypes(const std::string& code);
@@ -156,6 +159,16 @@ struct BuiltinsFixture : Fixture
     BuiltinsFixture(bool freeze = true, bool prepareAutocomplete = false);
 };
 
+struct ConstraintGraphBuilderFixture : Fixture
+{
+    TypeArena arena;
+    ConstraintGraphBuilder cgb;
+
+    ScopedFastFlag forceTheFlag;
+
+    ConstraintGraphBuilderFixture();
+};
+
 ModuleName fromString(std::string_view name);
 
 template<typename T>
@@ -175,8 +188,11 @@ bool isInArena(TypeId t, const TypeArena& arena);
 void dumpErrors(const ModulePtr& module);
 void dumpErrors(const Module& module);
 void dump(const std::string& name, TypeId ty);
+void dump(const std::vector<Constraint>& constraints);
 
 std::optional<TypeId> lookupName(ScopePtr scope, const std::string& name); // Warning: This function runs in O(n**2)
+
+std::optional<TypeId> linearSearchForBinding(Scope* scope, const char* name);
 
 } // namespace Luau
 

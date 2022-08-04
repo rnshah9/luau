@@ -2,13 +2,13 @@
 
 #include "Luau/Clone.h"
 #include "Luau/RecursionCounter.h"
+#include "Luau/TxnLog.h"
 #include "Luau/TypePack.h"
 #include "Luau/Unifiable.h"
 
 LUAU_FASTFLAG(DebugLuauCopyBeforeNormalizing)
 
 LUAU_FASTINTVARIABLE(LuauTypeCloneRecursionLimit, 300)
-LUAU_FASTFLAG(LuauNoMethodLocations)
 
 namespace Luau
 {
@@ -47,6 +47,7 @@ struct TypeCloner
     void operator()(const Unifiable::Generic& t);
     void operator()(const Unifiable::Bound<TypeId>& t);
     void operator()(const Unifiable::Error& t);
+    void operator()(const BlockedTypeVar& t);
     void operator()(const PrimitiveTypeVar& t);
     void operator()(const ConstrainedTypeVar& t);
     void operator()(const SingletonTypeVar& t);
@@ -58,6 +59,8 @@ struct TypeCloner
     void operator()(const UnionTypeVar& t);
     void operator()(const IntersectionTypeVar& t);
     void operator()(const LazyTypeVar& t);
+    void operator()(const UnknownTypeVar& t);
+    void operator()(const NeverTypeVar& t);
 };
 
 struct TypePackCloner
@@ -158,6 +161,11 @@ void TypeCloner::operator()(const Unifiable::Error& t)
     defaultClone(t);
 }
 
+void TypeCloner::operator()(const BlockedTypeVar& t)
+{
+    defaultClone(t);
+}
+
 void TypeCloner::operator()(const PrimitiveTypeVar& t)
 {
     defaultClone(t);
@@ -200,7 +208,7 @@ void TypeCloner::operator()(const FunctionTypeVar& t)
     ftv->tags = t.tags;
     ftv->argTypes = clone(t.argTypes, dest, cloneState);
     ftv->argNames = t.argNames;
-    ftv->retType = clone(t.retType, dest, cloneState);
+    ftv->retTypes = clone(t.retTypes, dest, cloneState);
     ftv->hasNoGenerics = t.hasNoGenerics;
 }
 
@@ -240,8 +248,6 @@ void TypeCloner::operator()(const TableTypeVar& t)
         arg = clone(arg, dest, cloneState);
 
     ttv->definitionModuleName = t.definitionModuleName;
-    if (!FFlag::LuauNoMethodLocations)
-        ttv->methodDefinitionLocations = t.methodDefinitionLocations;
     ttv->tags = t.tags;
 }
 
@@ -306,6 +312,16 @@ void TypeCloner::operator()(const LazyTypeVar& t)
     defaultClone(t);
 }
 
+void TypeCloner::operator()(const UnknownTypeVar& t)
+{
+    defaultClone(t);
+}
+
+void TypeCloner::operator()(const NeverTypeVar& t)
+{
+    defaultClone(t);
+}
+
 } // anonymous namespace
 
 TypePackId clone(TypePackId tp, TypeArena& dest, CloneState& cloneState)
@@ -313,7 +329,7 @@ TypePackId clone(TypePackId tp, TypeArena& dest, CloneState& cloneState)
     if (tp->persistent)
         return tp;
 
-    RecursionLimiter _ra(&cloneState.recursionCount, FInt::LuauTypeCloneRecursionLimit, "cloning TypePackId");
+    RecursionLimiter _ra(&cloneState.recursionCount, FInt::LuauTypeCloneRecursionLimit);
 
     TypePackId& res = cloneState.seenTypePacks[tp];
 
@@ -331,7 +347,7 @@ TypeId clone(TypeId typeId, TypeArena& dest, CloneState& cloneState)
     if (typeId->persistent)
         return typeId;
 
-    RecursionLimiter _ra(&cloneState.recursionCount, FInt::LuauTypeCloneRecursionLimit, "cloning TypeId");
+    RecursionLimiter _ra(&cloneState.recursionCount, FInt::LuauTypeCloneRecursionLimit);
 
     TypeId& res = cloneState.seenTypes[typeId];
 
@@ -379,6 +395,67 @@ TypeFun clone(const TypeFun& typeFun, TypeArena& dest, CloneState& cloneState)
 
     result.type = clone(typeFun.type, dest, cloneState);
 
+    return result;
+}
+
+TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log)
+{
+    ty = log->follow(ty);
+
+    TypeId result = ty;
+
+    if (auto pty = log->pending(ty))
+        ty = &pty->pending;
+
+    if (const FunctionTypeVar* ftv = get<FunctionTypeVar>(ty))
+    {
+        FunctionTypeVar clone = FunctionTypeVar{ftv->level, ftv->argTypes, ftv->retTypes, ftv->definition, ftv->hasSelf};
+        clone.generics = ftv->generics;
+        clone.genericPacks = ftv->genericPacks;
+        clone.magicFunction = ftv->magicFunction;
+        clone.tags = ftv->tags;
+        clone.argNames = ftv->argNames;
+        result = dest.addType(std::move(clone));
+    }
+    else if (const TableTypeVar* ttv = get<TableTypeVar>(ty))
+    {
+        LUAU_ASSERT(!ttv->boundTo);
+        TableTypeVar clone = TableTypeVar{ttv->props, ttv->indexer, ttv->level, ttv->state};
+        clone.definitionModuleName = ttv->definitionModuleName;
+        clone.name = ttv->name;
+        clone.syntheticName = ttv->syntheticName;
+        clone.instantiatedTypeParams = ttv->instantiatedTypeParams;
+        clone.instantiatedTypePackParams = ttv->instantiatedTypePackParams;
+        clone.tags = ttv->tags;
+        result = dest.addType(std::move(clone));
+    }
+    else if (const MetatableTypeVar* mtv = get<MetatableTypeVar>(ty))
+    {
+        MetatableTypeVar clone = MetatableTypeVar{mtv->table, mtv->metatable};
+        clone.syntheticName = mtv->syntheticName;
+        result = dest.addType(std::move(clone));
+    }
+    else if (const UnionTypeVar* utv = get<UnionTypeVar>(ty))
+    {
+        UnionTypeVar clone;
+        clone.options = utv->options;
+        result = dest.addType(std::move(clone));
+    }
+    else if (const IntersectionTypeVar* itv = get<IntersectionTypeVar>(ty))
+    {
+        IntersectionTypeVar clone;
+        clone.parts = itv->parts;
+        result = dest.addType(std::move(clone));
+    }
+    else if (const ConstrainedTypeVar* ctv = get<ConstrainedTypeVar>(ty))
+    {
+        ConstrainedTypeVar clone{ctv->level, ctv->parts};
+        result = dest.addType(std::move(clone));
+    }
+    else
+        return result;
+
+    asMutable(result)->documentationSymbol = ty->documentationSymbol;
     return result;
 }
 

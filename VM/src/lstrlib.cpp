@@ -8,6 +8,8 @@
 #include <string.h>
 #include <stdio.h>
 
+LUAU_FASTFLAGVARIABLE(LuauTostringFormatSpecifier, false);
+
 /* macro to `unsign' a character */
 #define uchar(c) ((unsigned char)(c))
 
@@ -979,14 +981,14 @@ static int str_format(lua_State* L)
             {
             case 'c':
             {
-                sprintf(buff, form, (int)luaL_checknumber(L, arg));
+                snprintf(buff, sizeof(buff), form, (int)luaL_checknumber(L, arg));
                 break;
             }
             case 'd':
             case 'i':
             {
                 addInt64Format(form, formatIndicator, formatItemSize);
-                sprintf(buff, form, (long long)luaL_checknumber(L, arg));
+                snprintf(buff, sizeof(buff), form, (long long)luaL_checknumber(L, arg));
                 break;
             }
             case 'o':
@@ -997,7 +999,7 @@ static int str_format(lua_State* L)
                 double argValue = luaL_checknumber(L, arg);
                 addInt64Format(form, formatIndicator, formatItemSize);
                 unsigned long long v = (argValue < 0) ? (unsigned long long)(long long)argValue : (unsigned long long)argValue;
-                sprintf(buff, form, v);
+                snprintf(buff, sizeof(buff), form, v);
                 break;
             }
             case 'e':
@@ -1006,7 +1008,7 @@ static int str_format(lua_State* L)
             case 'g':
             case 'G':
             {
-                sprintf(buff, form, (double)luaL_checknumber(L, arg));
+                snprintf(buff, sizeof(buff), form, (double)luaL_checknumber(L, arg));
                 break;
             }
             case 'q':
@@ -1028,9 +1030,29 @@ static int str_format(lua_State* L)
                 }
                 else
                 {
-                    sprintf(buff, form, s);
+                    snprintf(buff, sizeof(buff), form, s);
                     break;
                 }
+            }
+            case '*':
+            {
+                if (!FFlag::LuauTostringFormatSpecifier)
+                {
+                    luaL_error(L, "invalid option '%%*' to 'format'");
+                    break;
+                }
+
+                if (formatItemSize != 1)
+                {
+                    luaL_error(L, "'%%*' does not take a form");
+                }
+
+                size_t length;
+                const char* string = luaL_tolstring(L, arg, &length);
+
+                luaL_addlstring(&b, string, length);
+
+                continue; /* skip the `addsize' at the end */
             }
             default:
             { /* also treat cases `pnLlh' */

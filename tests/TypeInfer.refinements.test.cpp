@@ -8,13 +8,14 @@
 #include "doctest.h"
 
 LUAU_FASTFLAG(LuauLowerBoundsCalculation)
+LUAU_FASTFLAG(LuauSpecialTypesAsterisked)
 
 using namespace Luau;
 
 namespace
 {
-std::optional<ExprResult<TypePackId>> magicFunctionInstanceIsA(
-    TypeChecker& typeChecker, const ScopePtr& scope, const AstExprCall& expr, ExprResult<TypePackId> exprResult)
+std::optional<WithPredicate<TypePackId>> magicFunctionInstanceIsA(
+    TypeChecker& typeChecker, const ScopePtr& scope, const AstExprCall& expr, WithPredicate<TypePackId> withPredicate)
 {
     if (expr.args.size != 1)
         return std::nullopt;
@@ -32,7 +33,7 @@ std::optional<ExprResult<TypePackId>> magicFunctionInstanceIsA(
     unfreeze(typeChecker.globalTypes);
     TypePackId booleanPack = typeChecker.globalTypes.addTypePack({typeChecker.booleanType});
     freeze(typeChecker.globalTypes);
-    return ExprResult<TypePackId>{booleanPack, {IsAPredicate{std::move(*lvalue), expr.location, tfun->type}}};
+    return WithPredicate<TypePackId>{booleanPack, {IsAPredicate{std::move(*lvalue), expr.location, tfun->type}}};
 }
 
 struct RefinementClassFixture : Fixture
@@ -272,8 +273,8 @@ TEST_CASE_FIXTURE(Fixture, "typeguard_only_look_up_types_from_global_scope")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ("*unknown*", toString(requireTypeAtPosition({8, 44})));
-    CHECK_EQ("*unknown*", toString(requireTypeAtPosition({9, 38})));
+    CHECK_EQ("never", toString(requireTypeAtPosition({8, 44})));
+    CHECK_EQ("never", toString(requireTypeAtPosition({9, 38})));
 }
 
 TEST_CASE_FIXTURE(Fixture, "call_a_more_specific_function_using_typeguard")
@@ -353,8 +354,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "assert_non_binary_expressions_actually_resol
 
 TEST_CASE_FIXTURE(Fixture, "assign_table_with_refined_property_with_a_similar_type_is_illegal")
 {
-    ScopedFastFlag LuauTableSubtypingVariance2{"LuauTableSubtypingVariance2", true};
-
     CheckResult result = check(R"(
         local t: {x: number?} = {x = nil}
 
@@ -528,7 +527,10 @@ TEST_CASE_FIXTURE(Fixture, "type_narrow_to_vector")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ("*unknown*", toString(requireTypeAtPosition({3, 28})));
+    if (FFlag::LuauSpecialTypesAsterisked)
+        CHECK_EQ("*error-type*", toString(requireTypeAtPosition({3, 28})));
+    else
+        CHECK_EQ("<error-type>", toString(requireTypeAtPosition({3, 28})));
 }
 
 TEST_CASE_FIXTURE(Fixture, "nonoptional_type_can_narrow_to_nil_if_sense_is_true")
@@ -653,7 +655,7 @@ TEST_CASE_FIXTURE(Fixture, "type_guard_can_filter_for_overloaded_function")
     CHECK_EQ("nil", toString(requireTypeAtPosition({6, 28})));
 }
 
-TEST_CASE_FIXTURE(BuiltinsFixture, "type_guard_warns_on_no_overlapping_types_only_when_sense_is_true")
+TEST_CASE_FIXTURE(BuiltinsFixture, "type_guard_narrowed_into_nothingness")
 {
     CheckResult result = check(R"(
         local function f(t: {x: number})
@@ -668,7 +670,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "type_guard_warns_on_no_overlapping_types_onl
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ("*unknown*", toString(requireTypeAtPosition({3, 28})));
+    CHECK_EQ("never", toString(requireTypeAtPosition({3, 28})));
 }
 
 TEST_CASE_FIXTURE(Fixture, "not_a_or_not_b")
@@ -932,6 +934,8 @@ TEST_CASE_FIXTURE(Fixture, "apply_refinements_on_astexprindexexpr_whose_subscrip
 
 TEST_CASE_FIXTURE(Fixture, "discriminate_from_truthiness_of_x")
 {
+    ScopedFastFlag sff{"LuauFalsyPredicateReturnsNilInstead", true};
+
     CheckResult result = check(R"(
         type T = {tag: "missing", x: nil} | {tag: "exists", x: string}
 
@@ -947,7 +951,7 @@ TEST_CASE_FIXTURE(Fixture, "discriminate_from_truthiness_of_x")
     LUAU_REQUIRE_NO_ERRORS(result);
 
     CHECK_EQ(R"({| tag: "exists", x: string |})", toString(requireTypeAtPosition({5, 28})));
-    CHECK_EQ(R"({| tag: "missing", x: nil |})", toString(requireTypeAtPosition({7, 28})));
+    CHECK_EQ(R"({| tag: "exists", x: string |} | {| tag: "missing", x: nil |})", toString(requireTypeAtPosition({7, 28})));
 }
 
 TEST_CASE_FIXTURE(Fixture, "discriminate_tag")
@@ -1074,7 +1078,7 @@ TEST_CASE_FIXTURE(RefinementClassFixture, "typeguard_cast_free_table_to_vector")
 
     CHECK_EQ("Vector3", toString(requireTypeAtPosition({5, 28}))); // type(vec) == "vector"
 
-    CHECK_EQ("*unknown*", toString(requireTypeAtPosition({7, 28}))); // typeof(vec) == "Instance"
+    CHECK_EQ("never", toString(requireTypeAtPosition({7, 28}))); // typeof(vec) == "Instance"
 
     CHECK_EQ("{+ X: a, Y: b, Z: c +}", toString(requireTypeAtPosition({9, 28}))); // type(vec) ~= "vector" and typeof(vec) ~= "Instance"
 }
@@ -1191,7 +1195,7 @@ TEST_CASE_FIXTURE(RefinementClassFixture, "x_is_not_instance_or_else_not_part")
 
 TEST_CASE_FIXTURE(Fixture, "typeguard_doesnt_leak_to_elseif")
 {
-    const std::string code = R"(
+    CheckResult result = check(R"(
         function f(a)
            if type(a) == "boolean" then
                 local a1 = a
@@ -1201,10 +1205,63 @@ TEST_CASE_FIXTURE(Fixture, "typeguard_doesnt_leak_to_elseif")
                 local a3 = a
             end
         end
-    )";
-    CheckResult result = check(code);
+    )");
+
     LUAU_REQUIRE_NO_ERRORS(result);
-    dumpErrors(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "refine_unknowns")
+{
+    CheckResult result = check(R"(
+        local function f(x: unknown)
+            if type(x) == "string" then
+                local foo = x
+            else
+                local bar = x
+            end
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    CHECK_EQ("string", toString(requireTypeAtPosition({3, 28})));
+    CHECK_EQ("unknown", toString(requireTypeAtPosition({5, 28})));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "falsiness_of_TruthyPredicate_narrows_into_nil")
+{
+    ScopedFastFlag sff{"LuauFalsyPredicateReturnsNilInstead", true};
+
+    CheckResult result = check(R"(
+        local function f(t: {number})
+            local x = t[1]
+            if not x then
+                local foo = x
+            else
+                local bar = x
+            end
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    CHECK_EQ("nil", toString(requireTypeAtPosition({4, 28})));
+    CHECK_EQ("number", toString(requireTypeAtPosition({6, 28})));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "what_nonsensical_condition")
+{
+    CheckResult result = check(R"(
+        local function f(x)
+            if type(x) == "string" and type(x) == "number" then
+                local foo = x
+            end
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    CHECK_EQ("never", toString(requireTypeAtPosition({3, 28})));
 }
 
 TEST_SUITE_END();

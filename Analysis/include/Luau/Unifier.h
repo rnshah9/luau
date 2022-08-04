@@ -79,12 +79,9 @@ private:
     void tryUnifySingletons(TypeId subTy, TypeId superTy);
     void tryUnifyFunctions(TypeId subTy, TypeId superTy, bool isFunctionCall = false);
     void tryUnifyTables(TypeId subTy, TypeId superTy, bool isIntersection = false);
-    void DEPRECATED_tryUnifyTables(TypeId subTy, TypeId superTy, bool isIntersection = false);
-    void tryUnifyFreeTable(TypeId subTy, TypeId superTy);
-    void tryUnifySealedTables(TypeId subTy, TypeId superTy, bool isIntersection);
+    void tryUnifyScalarShape(TypeId subTy, TypeId superTy, bool reversed);
     void tryUnifyWithMetatable(TypeId subTy, TypeId superTy, bool reversed);
     void tryUnifyWithClass(TypeId subTy, TypeId superTy, bool reversed);
-    void tryUnifyIndexer(const TableIndexer& subIndexer, const TableIndexer& superIndexer);
 
     TypeId widen(TypeId ty);
     TypePackId widen(TypePackId tp);
@@ -110,7 +107,7 @@ private:
     void tryUnifyWithConstrainedSuperTypeVar(TypeId subTy, TypeId superTy);
 
 public:
-    void unifyLowerBound(TypePackId subTy, TypePackId superTy);
+    void unifyLowerBound(TypePackId subTy, TypePackId superTy, TypeLevel demotedLevel);
 
     // Report an "infinite type error" if the type "needle" already occurs within "haystack"
     void occursCheck(TypeId needle, TypeId haystack);

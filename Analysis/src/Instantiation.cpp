@@ -4,8 +4,6 @@
 #include "Luau/TxnLog.h"
 #include "Luau/TypeArena.h"
 
-LUAU_FASTFLAG(LuauNoMethodLocations)
-
 namespace Luau
 {
 
@@ -42,7 +40,7 @@ TypeId Instantiation::clean(TypeId ty)
     const FunctionTypeVar* ftv = log->getMutable<FunctionTypeVar>(ty);
     LUAU_ASSERT(ftv);
 
-    FunctionTypeVar clone = FunctionTypeVar{level, ftv->argTypes, ftv->retType, ftv->definition, ftv->hasSelf};
+    FunctionTypeVar clone = FunctionTypeVar{level, ftv->argTypes, ftv->retTypes, ftv->definition, ftv->hasSelf};
     clone.magicFunction = ftv->magicFunction;
     clone.tags = ftv->tags;
     clone.argNames = ftv->argNames;
@@ -110,8 +108,6 @@ TypeId ReplaceGenerics::clean(TypeId ty)
     if (const TableTypeVar* ttv = log->getMutable<TableTypeVar>(ty))
     {
         TableTypeVar clone = TableTypeVar{ttv->props, ttv->indexer, level, TableState::Free};
-        if (!FFlag::LuauNoMethodLocations)
-            clone.methodDefinitionLocations = ttv->methodDefinitionLocations;
         clone.definitionModuleName = ttv->definitionModuleName;
         return addType(std::move(clone));
     }

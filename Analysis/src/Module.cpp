@@ -3,6 +3,7 @@
 
 #include "Luau/Clone.h"
 #include "Luau/Common.h"
+#include "Luau/ConstraintGraphBuilder.h"
 #include "Luau/Normalize.h"
 #include "Luau/RecursionCounter.h"
 #include "Luau/Scope.h"
@@ -15,6 +16,8 @@
 
 LUAU_FASTFLAG(LuauLowerBoundsCalculation);
 LUAU_FASTFLAG(LuauNormalizeFlagIsConservative);
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTFLAGVARIABLE(LuauForceExportSurfacesToBeNormal, false);
 
 namespace Luau
 {
@@ -99,36 +102,65 @@ void Module::clonePublicInterface(InternalErrorReporter& ice)
 
     ScopePtr moduleScope = getModuleScope();
 
-    moduleScope->returnType = clone(moduleScope->returnType, interfaceTypes, cloneState);
-    if (moduleScope->varargPack)
-        moduleScope->varargPack = clone(*moduleScope->varargPack, interfaceTypes, cloneState);
+    TypePackId returnType = moduleScope->returnType;
+    std::optional<TypePackId> varargPack = FFlag::DebugLuauDeferredConstraintResolution ? std::nullopt : moduleScope->varargPack;
+    std::unordered_map<Name, TypeFun>* exportedTypeBindings =
+        FFlag::DebugLuauDeferredConstraintResolution ? nullptr : &moduleScope->exportedTypeBindings;
 
-    if (FFlag::LuauLowerBoundsCalculation)
+    returnType = clone(returnType, interfaceTypes, cloneState);
+
+    moduleScope->returnType = returnType;
+    if (varargPack)
     {
-        normalize(moduleScope->returnType, interfaceTypes, ice);
-        if (moduleScope->varargPack)
-            normalize(*moduleScope->varargPack, interfaceTypes, ice);
+        varargPack = clone(*varargPack, interfaceTypes, cloneState);
+        moduleScope->varargPack = varargPack;
     }
 
     ForceNormal forceNormal{&interfaceTypes};
 
-    for (auto& [name, tf] : moduleScope->exportedTypeBindings)
+    if (FFlag::LuauLowerBoundsCalculation)
     {
-        tf = clone(tf, interfaceTypes, cloneState);
-        if (FFlag::LuauLowerBoundsCalculation)
+        normalize(returnType, interfaceTypes, ice);
+        if (FFlag::LuauForceExportSurfacesToBeNormal)
+            forceNormal.traverse(returnType);
+        if (varargPack)
         {
-            normalize(tf.type, interfaceTypes, ice);
+            normalize(*varargPack, interfaceTypes, ice);
+            if (FFlag::LuauForceExportSurfacesToBeNormal)
+                forceNormal.traverse(*varargPack);
+        }
+    }
 
-            if (FFlag::LuauNormalizeFlagIsConservative)
+    if (exportedTypeBindings)
+    {
+        for (auto& [name, tf] : *exportedTypeBindings)
+        {
+            tf = clone(tf, interfaceTypes, cloneState);
+            if (FFlag::LuauLowerBoundsCalculation)
             {
-                // We're about to freeze the memory.  We know that the flag is conservative by design.  Cyclic tables
-                // won't be marked normal.  If the types aren't normal by now, they never will be.
-                forceNormal.traverse(tf.type);
+                normalize(tf.type, interfaceTypes, ice);
+
+                if (FFlag::LuauNormalizeFlagIsConservative)
+                {
+                    // We're about to freeze the memory.  We know that the flag is conservative by design.  Cyclic tables
+                    // won't be marked normal.  If the types aren't normal by now, they never will be.
+                    forceNormal.traverse(tf.type);
+                    for (GenericTypeDefinition param : tf.typeParams)
+                    {
+                        forceNormal.traverse(param.ty);
+
+                        if (param.defaultValue)
+                        {
+                            normalize(*param.defaultValue, interfaceTypes, ice);
+                            forceNormal.traverse(*param.defaultValue);
+                        }
+                    }
+                }
             }
         }
     }
 
-    for (TypeId ty : moduleScope->returnType)
+    for (TypeId ty : returnType)
     {
         if (get<GenericTypeVar>(follow(ty)))
         {
@@ -142,7 +174,12 @@ void Module::clonePublicInterface(InternalErrorReporter& ice)
     {
         ty = clone(ty, interfaceTypes, cloneState);
         if (FFlag::LuauLowerBoundsCalculation)
+        {
             normalize(ty, interfaceTypes, ice);
+
+            if (FFlag::LuauForceExportSurfacesToBeNormal)
+                forceNormal.traverse(ty);
+        }
     }
 
     freeze(internalTypes);

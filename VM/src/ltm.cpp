@@ -39,6 +39,7 @@ const char* const luaT_eventname[] = {
     "__namecall",
     "__call",
     "__iter",
+    "__len",
 
     "__eq",
 
@@ -52,7 +53,6 @@ const char* const luaT_eventname[] = {
     "__unm",
 
     
-    "__len",
     "__lt",
     "__le",
     "__concat",
@@ -88,8 +88,8 @@ const TValue* luaT_gettm(Table* events, TMS event, TString* ename)
     const TValue* tm = luaH_getstr(events, ename);
     LUAU_ASSERT(event <= TM_EQ);
     if (ttisnil(tm))
-    {                                            /* no tag method? */
-        events->flags |= cast_byte(1u << event); /* cache this fact */
+    {                                              /* no tag method? */
+        events->tmcache |= cast_byte(1u << event); /* cache this fact */
         return NULL;
     }
     else
